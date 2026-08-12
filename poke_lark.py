@@ -73,7 +73,16 @@ SOURCES: list[dict] = [
         "label": "ポケカ公式",
         "kind": "html",
         "url": "https://www.pokemon-card.com/info/",
-        "href_pattern": r"^/info/(?:\d+|detail/\d+)/?$",
+        # 一覧の各リンクは「(重複タイトル) カテゴリ タイトル 2026.6.19」という
+        # テキストになる。末尾に日付があることを記事の判定条件にすると、
+        # URL 形式(/info/005538.html, 外部ドメイン等)に依存せず拾える。
+        "require_date": True,
+        "dedup_title": True,
+        "allow_external": True,
+        "cat_labels": {
+            "商品": "card", "イベント": "event", "キャンペーン": "event",
+            "コラム": "other", "その他": "other",
+        },
         "enabled": True,
     },
     {
@@ -81,14 +90,17 @@ SOURCES: list[dict] = [
         "label": "ポケモン公式",
         "kind": "html",
         "url": "https://www.pokemon.co.jp/info/",
-        "href_pattern": r"^/info/\d+",
-        "enabled": True,
+        "require_date": True,
+        "allow_external": True,
+        # 2026-08 時点でニュース一覧が JS レンダリングになっており、
+        # 静的 HTML には記事リンクが存在しない(空のプレースホルダのみ)。
+        # 復活したら enabled を True に戻す。
+        "enabled": False,
     },
     {
         "name": "pokecainfo",
         "label": "ポケカ抽選速報",
         "kind": "rss",
-        # livedoor blog は index.rdf / atom.xml を持つ
         "url": "https://pokecainfo.livedoor.blog/index.rdf",
         "enabled": True,
     },
@@ -96,7 +108,8 @@ SOURCES: list[dict] = [
         "name": "pokebeach",
         "label": "PokeBeach",
         "kind": "rss",
-        "url": "https://www.pokebeach.com/feed",
+        # /feed は 500 を返す(XenForo 移行後)。フロントページ記事のフィードはこちら。
+        "url": "https://www.pokebeach.com/forums/forum/front-page-news.18/index.rss",
         "enabled": True,
     },
     {
@@ -104,7 +117,7 @@ SOURCES: list[dict] = [
         "label": "PokemonDB",
         "kind": "rss",
         "url": "https://pokemondb.net/news/feed",
-        "enabled": False,  # 英語ゲーム系。必要なら True
+        "enabled": False,  # 英語ゲーム系
     },
     {
         "name": "pokemonblog",
@@ -205,6 +218,7 @@ class Item:
     url: str
     published: str | None = None
     published_dt: datetime | None = None
+    official_cat: str = ""      # サイト側が持つカテゴリ(あれば分類の保険に使う)
     category: str = "other"
     category_label: str = DEFAULT_CATEGORY[1]
 
@@ -350,6 +364,26 @@ class LinkHarvester(HTMLParser):
             self._buf.append(data)
 
 
+_TRAILING_DATE = re.compile(r"(20\d{2})\s*[./年-]\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})\s*日?\s*$")
+
+
+def dedup_repeated_title(s: str) -> tuple[str, str]:
+    """「タイトル カテゴリ タイトル」形式から (タイトル, 前置き) を取り出す。
+
+    一覧ページはサムネイルの alt とテキストのタイトルが重複して
+    1 本のリンクテキストになることが多い。末尾に現れるタイトルが
+    それ以前にも出現していれば、それを本文とみなす。
+    「一部商品価格改定のお知らせ」のようにタイトル自体がカテゴリ名を
+    含むケースがあるため、カテゴリ名で切る方式は使わない。
+    """
+    n = len(s)
+    for length in range(n // 2, 4, -1):
+        suffix = s[n - length:]
+        if suffix in s[: n - length]:
+            return suffix.strip(), s[: n - length].strip()
+    return s, ""
+
+
 def parse_html(html_text: str, src: dict) -> list[Item]:
     harvester = LinkHarvester()
     try:
@@ -358,34 +392,61 @@ def parse_html(html_text: str, src: dict) -> list[Item]:
         LOG.error("HTML parse error for %s: %s", src["name"], e)
         return []
 
-    pattern = re.compile(src["href_pattern"])
     origin = re.match(r"^(https?://[^/]+)", src["url"]).group(1)
+    pattern = re.compile(src["href_pattern"]) if src.get("href_pattern") else None
+    cat_labels: dict[str, str] = src.get("cat_labels", {})
 
     items: list[Item] = []
     seen: set[str] = set()
     for href, text in harvester.links:
-        path = href
+        # --- URL の正規化 ---
         if href.startswith("http"):
-            if not href.startswith(origin):
+            full = href
+            if not src.get("allow_external") and not href.startswith(origin):
                 continue
-            path = href[len(origin):]
-        elif not href.startswith("/"):
+        elif href.startswith("/"):
+            full = origin + href
+        else:
             continue
 
-        if not pattern.search(path):
-            continue
-        if len(text) < 4:  # 「詳しくはこちら」等の空リンク除去
+        if pattern and not pattern.search(full[len(origin):] if full.startswith(origin) else full):
             continue
 
-        full = origin + path
+        # --- 記事判定: 末尾の日付 ---
+        dt = None
+        body = text
+        if src.get("require_date"):
+            m = _TRAILING_DATE.search(text)
+            if not m:
+                continue          # 日付が無いものはナビゲーション等
+            y, mo, d = (int(x) for x in m.groups())
+            try:
+                dt = datetime(y, mo, d, tzinfo=JST)
+            except ValueError:
+                continue
+            body = text[: m.start()].strip()
+        else:
+            dt, body = extract_date_anchored(text)
+
+        # --- タイトルと公式カテゴリ ---
+        official = ""
+        if src.get("dedup_title"):
+            body, prefix = dedup_repeated_title(body)
+            for label in cat_labels:
+                if prefix.endswith(label):
+                    official = label
+                    break
+
+        body = body.strip(" 　|-·・")
+        if len(body) < 4:
+            continue
         if full in seen:
             continue
         seen.add(full)
-        dt, title = extract_date_anchored(text)
-        if len(title) < 4:      # 日付を剥がしたら中身が無かった
-            continue
-        items.append(Item(src["name"], src["label"], title, full,
-                          published_dt=dt))
+
+        items.append(Item(src["name"], src["label"], body, full,
+                          published_dt=dt,
+                          official_cat=cat_labels.get(official, "")))
     return items
 
 
@@ -480,6 +541,11 @@ def classify(item: Item) -> Item:
     for key, label, keywords in CATEGORIES:
         for kw in keywords:
             if re.search(kw.lower(), hay):
+                item.category, item.category_label = key, label
+                return item
+    if item.official_cat:
+        for key, label, _ in CATEGORIES:
+            if key == item.official_cat:
                 item.category, item.category_label = key, label
                 return item
     item.category, item.category_label = DEFAULT_CATEGORY
