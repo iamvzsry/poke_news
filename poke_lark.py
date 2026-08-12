@@ -119,44 +119,74 @@ SOURCES: list[dict] = [
 # カテゴリ分類 (上から順に評価、最初にマッチしたものを採用)
 # --------------------------------------------------------------------------
 CATEGORIES: list[tuple[str, str, list[str]]] = [
+    # ↓ マッチ優先順。「開催」「発売」のような弱い語を持つ event は最後に置く
     (
-        "lottery",
-        "🎫 抽選・予約",
-        ["抽選", "応募", "受注", "予約", "先行販売", "招待販売", "再販",
+        "lottery", "🎫 抽選・予約",
+        ["抽選", "応募", "受注", "予約", "先行販売", "招待販売", "再販", "受付",
          "lottery", "pre-?order", "raffle"],
     ),
     (
-        "card",
-        "🃏 カード / 新弾",
+        "card", "🃏 カード / 新弾",
         ["拡張パック", "強化拡張", "ハイクラス", "スターターセット", "構築デッキ",
-         "カードリスト", "収録カード", "発売", "新商品", "プロモ", "サプライ",
-         "booster", "expansion", "set list", "tcg", "card"],
+         "カードリスト", "収録カード", "新弾", "プロモ", "スペシャルカードセット",
+         "バトルデッキ", "booster", "expansion", "set list"],
     ),
     (
-        "event",
-        "📍 イベント",
-        ["イベント", "大会", "チャンピオンシップ", "シティリーグ", "ジムバトル",
-         "トレーナーズリーグ", "カードゲーム教室", "体験会", "ポケモンセンター",
-         "ストア", "コラボ", "開催", "出展", "championship", "event", "tournament"],
+        "tournament", "🏆 大会・競技",
+        ["チャンピオンシップ", "シティリーグ", "ジムバトル", "トレーナーズリーグ",
+         "スクエア", "WCS", "PJCS", "CL20", "優勝", "上位入賞", "デッキレシピ",
+         "レギュレーション", "殿堂", "championship", "tournament", "regional"],
     ),
     (
-        "game",
-        "🎮 ゲーム",
-        ["ポケモンGO", "Pokémon GO", "Pokopia", "スカーレット", "バイオレット",
+        "app", "📱 アプリ",
+        ["ポケポケ", "TCG Pocket", "ポケモンGO", "Pokémon GO", "Pokemon GO",
+         "ポケモンスリープ", "ポケモンユナイト", "カフェリミックス", "ポケモンHOME",
+         "ポケモンマスターズ", "GO Fest"],
+    ),
+    (
+        "goods", "🛍️ グッズ・商品",
+        ["グッズ", "ぬいぐるみ", "フィギュア", "サプライ", "スリーブ", "デッキケース",
+         "デッキシールド", "プレイマット", "ポケモンセンターオンライン", "受注生産",
+         "周辺グッズ", "ポケモンフィット", "merch", "plush"],
+    ),
+    (
+        "game", "🎮 ゲーム",
+        ["Pokopia", "ポコピア", "スカーレット", "バイオレット", "レジェンズ",
          "アップデート", "配信", "配布", "シリアルコード", "ふしぎなおくりもの",
-         "Nintendo Switch", "DLC", "update", "distribution", "patch"],
+         "Nintendo Switch", "ニンテンドー", "DLC", "体験版", "発売日",
+         "update", "distribution", "patch", "trailer"],
+    ),
+    (
+        "media", "🎬 アニメ・映画",
+        ["アニメ", "映画", "劇場版", "放送", "第\\d+話", "声優", "主題歌",
+         "PV公開", "CM", "YouTube", "anime", "movie", "episode"],
+    ),
+    (
+        "event", "📍 イベント",
+        ["イベント", "カードゲーム教室", "体験会", "コラボ", "カフェ", "ラウンジ",
+         "出展", "開催", "ポップアップ", "スタンプラリー", "展示", "フェス",
+         "ポケモンセンター", "ストア", "event"],
     ),
 ]
+
 DEFAULT_CATEGORY = ("other", "📰 その他")
 
-CATEGORY_ORDER = ["lottery", "card", "event", "game", "other"]
+CATEGORY_ORDER = ["lottery", "card", "tournament", "event",
+                  "goods", "app", "game", "media", "other"]
+
+# 1カテゴリあたりの最大通知件数
+PER_CATEGORY_LIMIT = 5
 
 # 抽選系はヘッダー色を変えて目立たせる
 HEADER_TEMPLATE = {
     "lottery": "red",
     "card": "orange",
+    "tournament": "purple",
     "event": "green",
+    "goods": "carmine",
+    "app": "turquoise",
     "game": "blue",
+    "media": "indigo",
     "other": "grey",
 }
 
@@ -164,6 +194,9 @@ HEADER_TEMPLATE = {
 # --------------------------------------------------------------------------
 # データモデル
 # --------------------------------------------------------------------------
+WEEKDAY_JA = ["月", "火", "水", "木", "金", "土", "日"]
+
+
 @dataclass
 class Item:
     source: str
@@ -171,6 +204,7 @@ class Item:
     title: str
     url: str
     published: str | None = None
+    published_dt: datetime | None = None
     category: str = "other"
     category_label: str = DEFAULT_CATEGORY[1]
 
@@ -178,6 +212,28 @@ class Item:
     def uid(self) -> str:
         base = self.url or f"{self.source}:{self.title}"
         return hashlib.sha256(base.encode("utf-8")).hexdigest()[:20]
+
+    @property
+    def date_label(self) -> str:
+        """カード上に出す日付表記。取れなければ空文字。"""
+        if not self.published_dt:
+            return ""
+        d = self.published_dt.astimezone(JST)
+        today = datetime.now(JST).date()
+        delta = (today - d.date()).days
+        wd = WEEKDAY_JA[d.weekday()]
+        if delta == 0:
+            return "本日"
+        if delta == 1:
+            return "昨日"
+        if 0 < delta < 7:
+            return f"{d.month}/{d.day}({wd})"
+        return f"{d.year % 100:02d}/{d.month:02d}/{d.day:02d}({wd})"
+
+    @property
+    def sort_key(self) -> float:
+        # 日付不明は最古扱い(末尾)にする
+        return self.published_dt.timestamp() if self.published_dt else 0.0
 
 
 # --------------------------------------------------------------------------
@@ -251,7 +307,8 @@ def parse_feed(xml_text: str, src: dict) -> list[Item]:
                 pub = child.text.strip()
 
         if title and link:
-            items.append(Item(src["name"], src["label"], clean_text(title), link, pub))
+            items.append(Item(src["name"], src["label"], clean_text(title), link,
+                              pub, parse_date_string(pub)))
     return items
 
 
@@ -324,8 +381,91 @@ def parse_html(html_text: str, src: dict) -> list[Item]:
         if full in seen:
             continue
         seen.add(full)
-        items.append(Item(src["name"], src["label"], text, full))
+        dt, title = extract_date_anchored(text)
+        if len(title) < 4:      # 日付を剥がしたら中身が無かった
+            continue
+        items.append(Item(src["name"], src["label"], title, full,
+                          published_dt=dt))
     return items
+
+
+# 「2026.1.16」「2026/01/16」「2026年1月16日」「2026-01-16」「01.16」を拾う
+_DATE_FULL = re.compile(r"(20\d{2})\s*[./年-]\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})\s*日?")
+_DATE_SHORT = re.compile(r"(?<!\d)(\d{1,2})\s*[./月]\s*(\d{1,2})\s*日?(?!\d)")
+
+
+def parse_date_string(s: str | None) -> datetime | None:
+    """RSS の pubDate / published を datetime に。RFC2822 と ISO8601 の両方に対応。"""
+    if not s:
+        return None
+    s = s.strip()
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(s)
+        if dt:
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    return extract_date_from_text(s)[0]
+
+
+_DATE_ANCHORED = re.compile(
+    r"^\s*(20\d{2})\s*[./年-]\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})\s*日?\s*"
+    r"|\s*(20\d{2})\s*[./年-]\s*(\d{1,2})\s*[./月-]\s*(\d{1,2})\s*日?\s*$"
+)
+
+
+def extract_date_anchored(text: str) -> tuple[datetime | None, str]:
+    """文字列の先頭または末尾にある日付だけを取り出す。
+
+    一覧ページは「タイトル 2026.1.16」のように日付が端に来る。
+    一方「1月23日発売の拡張パック」のように文中に出る日付は
+    掲載日ではなく発売日なので、剥がすと題意が壊れる。
+    そのため HTML 側では端に付いたものだけを掲載日とみなす。
+    """
+    m = _DATE_ANCHORED.search(text)
+    if not m:
+        return None, text
+    nums = [g for g in m.groups() if g is not None]
+    if len(nums) != 3:
+        return None, text
+    y, mo, d = (int(x) for x in nums)
+    try:
+        dt = datetime(y, mo, d, tzinfo=JST)
+    except ValueError:
+        return None, text
+    return dt, (text[:m.start()] + text[m.end():]).strip(" 　|-·・")
+
+
+def extract_date_from_text(text: str) -> tuple[datetime | None, str]:
+    """文字列のどこかにある日付を取り出す(RSS の日付文字列用)。"""
+    m = _DATE_FULL.search(text)
+    if m:
+        y, mo, d = (int(x) for x in m.groups())
+        try:
+            return datetime(y, mo, d, tzinfo=JST), (text[:m.start()] + text[m.end():]).strip()
+        except ValueError:
+            return None, text
+
+    m = _DATE_SHORT.search(text)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        now = datetime.now(JST)
+        try:
+            dt = datetime(now.year, mo, d, tzinfo=JST)
+        except ValueError:
+            return None, text
+        # 未来すぎる場合は前年扱い(年末年始のまたぎ対策)
+        if (dt - now).days > 180:
+            dt = dt.replace(year=now.year - 1)
+        return dt, (text[:m.start()] + text[m.end():]).strip()
+
+    return None, text
 
 
 def clean_text(s: str) -> str:
@@ -452,7 +592,11 @@ class LarkNotifier:
             lines = []
             for it in grouped[cat]:
                 t = it.title if len(it.title) <= 90 else it.title[:88] + "…"
-                lines.append(f"・[{t}]({it.url})\n　<font color='grey'>{it.label}</font>")
+                date = it.date_label or "日付不明"
+                lines.append(
+                    f"・[{t}]({it.url})\n"
+                    f"　<font color='grey'>{date} ／ {it.label}</font>"
+                )
             elements.append({"tag": "div",
                              "text": {"tag": "lark_md", "content": "\n".join(lines)}})
             elements.append({"tag": "hr"})
@@ -517,10 +661,25 @@ def run(args: argparse.Namespace) -> int:
     state = State(args.state)
     fresh = [i for i in all_items if state.is_new(i.uid)]
 
-    # ソース側の並び順を保ちつつ、抽選 > カード > イベント > ゲーム の優先度で並べ替え
-    fresh.sort(key=lambda i: CATEGORY_ORDER.index(i.category))
-    if args.limit:
-        fresh = fresh[: args.limit]
+    # カテゴリ毎に「新しい順で上位 N 件」だけ残す
+    per_cat: dict[str, list[Item]] = {}
+    for i in fresh:
+        per_cat.setdefault(i.category, []).append(i)
+
+    selected: list[Item] = []
+    dropped: list[Item] = []
+    for cat in CATEGORY_ORDER:
+        bucket = per_cat.get(cat)
+        if not bucket:
+            continue
+        bucket.sort(key=lambda i: i.sort_key, reverse=True)
+        selected.extend(bucket[: args.per_category])
+        dropped.extend(bucket[args.per_category:])
+        if len(bucket) > args.per_category:
+            LOG.info("category %s: %d new, sending top %d",
+                     cat, len(bucket), args.per_category)
+
+    fresh = selected
 
     if args.seed:
         for i in all_items:
@@ -562,6 +721,15 @@ def run(args: argparse.Namespace) -> int:
         if i + CHUNK < len(fresh):
             time.sleep(1)
 
+    if dropped and not args.backlog:
+        # 上限で溢れた分は既読にする。そうしないと古い記事が毎回先頭に
+        # 並び続け、新着が押し出される(バックログの飢餓)。
+        for it in dropped:
+            state.mark(it.uid)
+        state.save()
+        LOG.info("marked %d overflow items as seen (use --backlog to keep)",
+                 len(dropped))
+
     LOG.info("sent %d items", len(fresh))
     return 0
 
@@ -573,7 +741,10 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="送信せず payload を出力")
     p.add_argument("--seed", action="store_true", help="初回: 既読登録のみ")
     p.add_argument("--text", action="store_true", help="カードでなくプレーンテキストで送る")
-    p.add_argument("--limit", type=int, default=30, help="1回の最大通知件数")
+    p.add_argument("--per-category", type=int, default=PER_CATEGORY_LIMIT,
+                   help=f"1カテゴリあたりの最大通知件数 (既定 {PER_CATEGORY_LIMIT})")
+    p.add_argument("--backlog", action="store_true",
+                   help="上限で溢れた分を既読にせず次回に回す")
     p.add_argument("--debug-source", action="store_true",
                    help="抽出結果をダンプ(セレクタ調整用)")
     p.add_argument("-v", "--verbose", action="store_true")
